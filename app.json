@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "BarberApp",
+    "slug": "BarberApp",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "barberapp",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "userInterfaceStyle": "automatic",
+      "bundleIdentifier": "com.raja49.BarberApp"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#0b0b0b"
+      },
+      "userInterfaceStyle": "automatic",
+      "package": "com.raja49.BarberApp"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router"
+    ]
+  }
+}
