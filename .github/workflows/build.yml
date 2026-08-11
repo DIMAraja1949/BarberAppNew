@@ -23,7 +23,7 @@ jobs:
           eas-version: latest
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build APK with EAS
         run: npx eas build --platform android --profile preview --non-interactive
