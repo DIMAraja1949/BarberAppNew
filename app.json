@@ -1,31 +1,52 @@
 {
   "expo": {
-    "name": "BarberApp",
+    "name": "Barber App Pro",
     "slug": "BarberApp",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "barberapp",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "userInterfaceStyle": "automatic",
-      "bundleIdentifier": "com.raja49.BarberApp"
+      "userInterfaceStyle": "light",
+      "bundleIdentifier": "com.simodayyan.barberapp",
+      "buildNumber": "2",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSPhotoLibraryUsageDescription": "We access your photos so you can upload a profile picture or post your haircut work. For example, you can choose a photo of your haircut to share in Real Works & Reels.",
+        "NSLocationWhenInUseUsageDescription": "We use your location to fill in your home address for barber home visits and to show barbers near you. For example, when you request a barber at your home, we use your position to set the visit address."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#0b0b0b"
+        "backgroundColor": "#000000"
       },
-      "userInterfaceStyle": "automatic",
-      "package": "com.raja49.BarberApp"
+      "userInterfaceStyle": "light",
+      "package": "com.simodayyan.barberapp",
+      "versionCode": 2
     },
     "web": {
       "bundler": "metro",
       "output": "static"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-mark.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#000000",
+          "imageWidth": 180
+        }
+      ],
+      "expo-video",
+      "expo-font",
+      "expo-image",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "extra": {
       "router": {},

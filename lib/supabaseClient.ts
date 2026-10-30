@@ -1,0 +1,1 @@
+export { supabase, getSupabaseErrorMessage } from "./supabase";

@@ -1,18 +1,18 @@
-import React, { useEffect, useState } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  Linking,
-  ActivityIndicator,
-  SafeAreaView,
-  StatusBar,
-  Alert,
-} from "react-native";
 import { FontAwesome5, Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
+import { useEffect, useState } from "react";
+import {
+    ActivityIndicator,
+    Alert,
+    FlatList,
+    Linking,
+    SafeAreaView,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from "react-native";
 import { supabase } from "../lib/supabase";
 
 export default function FollowUpScreen() {
@@ -27,20 +27,21 @@ export default function FollowUpScreen() {
   async function fetchClientsFollowUp() {
     try {
       setLoading(true);
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("*");
+      const { data, error } = await supabase.from("profiles").select("*");
 
       if (error) throw error;
       setClients(data || []);
-    } catch (error: any) {
-      console.log("Error fetching follow-up data:", error.message);
+    } catch {
     } finally {
       setLoading(false);
     }
   }
 
-  const sendWhatsAppReminder = (clientName: string, clientPhone: string, days: number) => {
+  const sendWhatsAppReminder = (
+    clientName: string,
+    clientPhone: string,
+    days: number,
+  ) => {
     if (!clientPhone) {
       Alert.alert("تنبيه", "رقم هاتفك غير متوفر لهذا العميل.");
       return;
@@ -73,10 +74,13 @@ export default function FollowUpScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
-      
+
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          style={styles.backButton}
+        >
           <Ionicons name="arrow-back" size={24} color="#CD813E" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>تتبع مواعيد الزبناء (Follow-Up)</Text>
@@ -94,13 +98,23 @@ export default function FollowUpScreen() {
           renderItem={({ item }) => (
             <View style={styles.clientCard}>
               <View style={styles.clientInfo}>
-                <Text style={styles.clientName}>{item.name || "زبون بدون اسم"}</Text>
-                <Text style={styles.clientPhone}>{item.phone || item.email || "لا توجد معلومات اتصال"}</Text>
+                <Text style={styles.clientName}>
+                  {item.name || "زبون بدون اسم"}
+                </Text>
+                <Text style={styles.clientPhone}>
+                  {item.phone || item.email || "لا توجد معلومات اتصال"}
+                </Text>
               </View>
 
               <TouchableOpacity
                 style={styles.whatsappButton}
-                onPress={() => sendWhatsAppReminder(item.name, item.phone, item.follow_up_days || 10)}
+                onPress={() =>
+                  sendWhatsAppReminder(
+                    item.name,
+                    item.phone,
+                    item.follow_up_days || 10,
+                  )
+                }
               >
                 <FontAwesome5 name="whatsapp" size={18} color="#fff" />
                 <Text style={styles.whatsappText}>تذكير واتساب</Text>
@@ -147,7 +161,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   clientInfo: { flex: 1, alignItems: "flex-end" },
-  clientName: { color: "#fff", fontSize: 16, fontWeight: "bold", marginBottom: 4 },
+  clientName: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "bold",
+    marginBottom: 4,
+  },
   clientPhone: { color: "#888", fontSize: 12 },
   whatsappButton: {
     backgroundColor: "#25D366",
@@ -157,6 +176,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 8,
   },
-  whatsappText: { color: "#fff", fontSize: 12, fontWeight: "bold", marginLeft: 6 },
-  emptyText: { color: "#888", textAlign: "center", marginTop: 40, fontSize: 14 },
+  whatsappText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "bold",
+    marginLeft: 6,
+  },
+  emptyText: {
+    color: "#888",
+    textAlign: "center",
+    marginTop: 40,
+    fontSize: 14,
+  },
 });

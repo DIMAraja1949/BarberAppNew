@@ -1,27 +1,145 @@
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useState } from "react";
-import { ActivityIndicator, View, Text } from "react-native";
-import { supabase } from "./supabaseClient";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Animated, Easing, Image, StyleSheet, View } from "react-native";
+// IMPORTANT: same client as index.tsx (one Supabase client for the whole app)
+import { GuestModeContext } from "../lib/guestMode";
+import { supabase } from "../lib/supabase";
 
-export default function RootLayout() {
-  const [session, setSession] = useState<any>(null);
-  const [initializing, setInitializing] = useState(true);
-  const router = useRouter();
-  const segments = useSegments();
+type StartupSplashProps = {
+  exiting: boolean;
+  onExitComplete: () => void;
+};
+
+function StartupSplash({ exiting, onExitComplete }: StartupSplashProps) {
+  const entrance = useRef(new Animated.Value(0)).current;
+  const breathing = useRef(new Animated.Value(0)).current;
+  const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
+  const exitAnimation = useRef<Animated.CompositeAnimation | null>(null);
+  const entranceScale = entrance.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.9, 1],
+  });
+  const breathingScale = breathing.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.985, 1.015],
+  });
+  const breathingOpacity = breathing.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.9, 1],
+  });
 
   useEffect(() => {
-    // 1. التحقق واش كاينين بيانات الجلسة مخزنة مسبقاً
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setInitializing(false);
+    const intro = Animated.timing(entrance, {
+      toValue: 1,
+      duration: 620,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
     });
 
-    // 2. الاستماع لأي تغيير في حالة تسجيل الدخول (دخول أو خروج)
+    intro.start(({ finished }) => {
+      if (!finished) return;
+
+      pulseLoop.current = Animated.loop(
+        Animated.sequence([
+          Animated.timing(breathing, {
+            toValue: 1,
+            duration: 1500,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
+          }),
+          Animated.timing(breathing, {
+            toValue: 0,
+            duration: 1500,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+      pulseLoop.current.start();
+    });
+
+    return () => {
+      intro.stop();
+      pulseLoop.current?.stop();
+      exitAnimation.current?.stop();
+    };
+  }, [breathing, entrance]);
+
+  useEffect(() => {
+    if (!exiting) return;
+
+    pulseLoop.current?.stop();
+    exitAnimation.current = Animated.parallel([
+      Animated.timing(entrance, {
+        toValue: 0,
+        duration: 240,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(breathing, {
+        toValue: 0,
+        duration: 240,
+        useNativeDriver: true,
+      }),
+    ]);
+    exitAnimation.current.start(({ finished }) => {
+      if (finished) onExitComplete();
+    });
+  }, [breathing, entrance, exiting, onExitComplete]);
+
+  return (
+    <View style={styles.splashOverlay}>
+      <Animated.View
+        style={[
+          styles.logoEntrance,
+          { opacity: entrance, transform: [{ scale: entranceScale }] },
+        ]}
+      >
+        <Animated.View
+          style={{
+            opacity: breathingOpacity,
+            transform: [{ scale: breathingScale }],
+          }}
+        >
+          <Image
+            source={require("../assets/images/splash-mark.png")}
+            style={styles.logo}
+            resizeMode="contain"
+            accessibilityLabel="BarberApp logo"
+          />
+        </Animated.View>
+      </Animated.View>
+    </View>
+  );
+}
+
+export default function RootLayout() {
+  // We only keep the user id (a string), NOT the whole session object.
+  // undefined = still loading, null = logged out, string = logged in.
+  const [userId, setUserId] = useState<string | null | undefined>(undefined);
+  const [guestMode, setGuestMode] = useState(false);
+  const [showStartupSplash, setShowStartupSplash] = useState(true);
+  const router = useRouter();
+  const segments = useSegments();
+  const firstSegment = (segments as string[])[0];
+  const handleSplashExitComplete = useCallback(() => {
+    setShowStartupSplash(false);
+  }, []);
+
+  useEffect(() => {
+    // 1. Check for a stored session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUserId(session?.user?.id ?? null);
+    });
+
+    // 2. Listen for login / logout
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
+    } = supabase.auth.onAuthStateChange((_, session) => {
+      // Same user id => React ignores the update => no re-render, no redirect
+      if (session?.user) setGuestMode(false);
+      setUserId(session?.user?.id ?? null);
     });
 
     return () => {
@@ -29,64 +147,77 @@ export default function RootLayout() {
     };
   }, []);
 
-  // التحكم في التوجيه التلقائي
+  // Redirect logic
   useEffect(() => {
-    if (initializing) return;
+    if (userId === undefined) return; // still initializing
 
-    const inAuthGroup = segments[0] === "" || segments[0] === "index" || segments[0] === "register";
+    const isPublic =
+      !firstSegment ||
+      ["index", "register", "terms", "privacy"].includes(firstSegment);
+    const isGuestBrowsable = [
+      "booking",
+      "home",
+      "profile",
+      "reels",
+      "shop-location",
+    ].includes(firstSegment);
 
-    if (!session && !inAuthGroup) {
-      // إيلا ماكانش مسجل دخولو،ديه لصفحة الـ Login (index)
+    if (userId === null && !isPublic && !(guestMode && isGuestBrowsable)) {
       router.replace("/");
-    } else if (session && inAuthGroup) {
-      // إيلا كان مسجل دخولو من قبل،ديه مباشرة لصفحة home
-      router.replace("/home");
     }
-  }, [session, initializing, segments]);
-
-  if (initializing) {
-    return (
-      <View
-        style={{
-          flex: 1,
-          justifyContent: "center",
-          alignItems: "center",
-          backgroundColor: "#000",
-        }}
-      >
-        <ActivityIndicator size="large" color="#CD813E" />
-        <Text 
-          style={{ 
-            color: '#CD813E', 
-            marginTop: 15, 
-            fontSize: 18, 
-            fontWeight: 'bold', 
-            letterSpacing: 1.5 
-          }}
-        >
-          BarberApp
-        </Text>
-      </View>
-    );
-  }
+  }, [userId, guestMode, firstSegment]);
 
   return (
-    <>
-      <StatusBar style="light" />
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="index" />
-        <Stack.Screen name="home" />
-        <Stack.Screen name="profile" />
-        <Stack.Screen name="booking" />
-        <Stack.Screen name="consultation" />
-        <Stack.Screen name="ai-analysis" />
-        <Stack.Screen name="ai-scanner" />
-        <Stack.Screen name="register" />
-        <Stack.Screen name="success" />
-        <Stack.Screen name="reels" />
-        <Stack.Screen name="modal" options={{ presentation: "modal" }} />
-        <Stack.Screen name="+not-found" />
-      </Stack>
-    </>
+    <GuestModeContext.Provider value={{ guestMode, setGuestMode }}>
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        {userId !== undefined && (
+          <Stack screenOptions={{ headerShown: false }}>
+            <Stack.Screen name="index" />
+            <Stack.Screen name="home" />
+            <Stack.Screen name="profile" />
+            <Stack.Screen name="booking" />
+            <Stack.Screen name="register" />
+            <Stack.Screen name="terms" />
+            <Stack.Screen name="privacy" />
+            <Stack.Screen name="shop-location" />
+            <Stack.Screen name="success" />
+            <Stack.Screen name="reels" />
+            {/* Admin Dashboard screen */}
+            <Stack.Screen name="admin-dashboard" />
+            <Stack.Screen name="modal" options={{ presentation: "modal" }} />
+            <Stack.Screen name="+not-found" />
+          </Stack>
+        )}
+        {showStartupSplash && (
+          <StartupSplash
+            exiting={userId !== undefined}
+            onExitComplete={handleSplashExitComplete}
+          />
+        )}
+      </View>
+    </GuestModeContext.Provider>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: "#000000",
+  },
+  splashOverlay: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#000000",
+  },
+  logoEntrance: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  logo: {
+    width: 180,
+    height: 180,
+  },
+});

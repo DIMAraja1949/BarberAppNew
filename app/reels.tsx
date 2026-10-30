@@ -1,43 +1,408 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  FlatList, 
-  Dimensions, 
-  TouchableOpacity, 
-  ActivityIndicator, 
-  Alert,
-  StatusBar,
-  Modal,
-  TextInput,
-  Share,
-  KeyboardAvoidingView,
-  Platform
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
-import { Video, ResizeMode } from 'expo-av';
-import * as ImagePicker from 'expo-image-picker';
-import { supabase } from '../lib/supabase';
+import { Ionicons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as ImagePicker from "expo-image-picker";
+import { LinearGradient } from "expo-linear-gradient";
+import { useVideoPlayer, VideoView } from "expo-video";
+import { useEffect, useRef, useState } from "react";
+import {
+    ActivityIndicator,
+    Alert,
+    Animated,
+    Dimensions,
+    FlatList,
+    KeyboardAvoidingView,
+    Modal,
+    PanResponder,
+    Platform,
+    Share,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    useWindowDimensions,
+    View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { supabase } from "../lib/supabase";
 
-const { width, height } = Dimensions.get('window');
+const { width } = Dimensions.get("window");
+
+type ReportTarget = {
+  contentType: "reel" | "comment" | "gallery";
+  contentId: string;
+  reportedUserId?: string;
+};
+
+const ReelItem = ({
+  item,
+  index,
+  scrollY,
+  isVisible,
+  insets,
+  reelHeight,
+  isAdmin,
+  currentUserId,
+  onLike,
+  onComment,
+  onShare,
+  onDelete,
+  onReport,
+  onBlock,
+  onFollow,
+  isMuted,
+  onToggleMute,
+}: any) => {
+  const inputRange = [
+    (index - 1) * reelHeight,
+    index * reelHeight,
+    (index + 1) * reelHeight,
+  ];
+
+  const scale = scrollY.interpolate({
+    inputRange,
+    outputRange: [0.9, 1, 0.9],
+    extrapolate: "clamp",
+  });
+
+  const opacity = scrollY.interpolate({
+    inputRange,
+    outputRange: [0.6, 1, 0.6],
+    extrapolate: "clamp",
+  });
+  const [progress, setProgress] = useState(0);
+  const [showHeart, setShowHeart] = useState(false);
+  const heartScale = useRef(new Animated.Value(0)).current;
+  const lastTap = useRef(0);
+  const isDragging = useRef(false);
+  const knobScale = useRef(new Animated.Value(1)).current;
+
+  const player = useVideoPlayer(item.video_url, (player: any) => {
+    player.loop = true;
+    player.muted = isMuted;
+    if (isVisible) {
+      player.play();
+    }
+  });
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => {
+        isDragging.current = true;
+        player.pause();
+        Animated.spring(knobScale, {
+          toValue: 1.5,
+          useNativeDriver: true,
+        }).start();
+      },
+      onPanResponderMove: (_, gestureState) => {
+        const barWidth = width - 40;
+        // Adjust for the 20px padding on the left
+        const relativeX = gestureState.moveX - 20;
+        const newProgress = Math.max(0, Math.min(1, relativeX / barWidth));
+        setProgress(newProgress);
+
+        // Real-time seeking for smoothness
+        if (player.duration > 0) {
+          player.currentTime = newProgress * player.duration;
+        }
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        isDragging.current = false;
+        Animated.spring(knobScale, {
+          toValue: 1,
+          useNativeDriver: true,
+        }).start();
+        const barWidth = width - 40;
+        const relativeX = gestureState.moveX - 20;
+        const newProgress = Math.max(0, Math.min(1, relativeX / barWidth));
+
+        if (player.duration > 0) {
+          player.currentTime = newProgress * player.duration;
+        }
+        player.play();
+      },
+    }),
+  ).current;
+
+  useEffect(() => {
+    player.muted = isMuted;
+  }, [isMuted, player]);
+
+  useEffect(() => {
+    if (isVisible) {
+      player.play();
+    } else {
+      player.pause();
+      // Reset video to start when moving to another reel
+      if (player.duration > 0) {
+        player.currentTime = 0;
+        setProgress(0);
+      }
+    }
+  }, [isVisible, player]);
+
+  // High-precision progress tracking
+  useEffect(() => {
+    let animationFrame: number;
+
+    const updateProgress = () => {
+      if (isVisible && player.duration > 0 && !isDragging.current) {
+        const currentProgress = player.currentTime / player.duration;
+        setProgress(currentProgress);
+      }
+      animationFrame = requestAnimationFrame(updateProgress);
+    };
+
+    if (isVisible) {
+      animationFrame = requestAnimationFrame(updateProgress);
+    }
+
+    return () => {
+      if (animationFrame) cancelAnimationFrame(animationFrame);
+    };
+  }, [isVisible, player]);
+
+  const [localIsPlaying, setLocalIsPlaying] = useState(true);
+
+  const togglePlayPause = () => {
+    const now = Date.now();
+    const DOUBLE_TAP_DELAY = 300;
+
+    if (lastTap.current && now - lastTap.current < DOUBLE_TAP_DELAY) {
+      // Double Tap Detected
+      handleDoubleTapLike();
+    } else {
+      // Single Tap Logic
+      if (player.playing) {
+        player.pause();
+        setLocalIsPlaying(false);
+      } else {
+        player.play();
+        setLocalIsPlaying(true);
+      }
+    }
+    lastTap.current = now;
+  };
+
+  const handleDoubleTapLike = () => {
+    if (!item.isLiked) {
+      onLike(item);
+    }
+
+    // Heart Animation
+    setShowHeart(true);
+    Animated.sequence([
+      Animated.spring(heartScale, {
+        toValue: 1,
+        friction: 3,
+        useNativeDriver: true,
+      }),
+      Animated.timing(heartScale, {
+        toValue: 0,
+        duration: 200,
+        delay: 500,
+        useNativeDriver: true,
+      }),
+    ]).start(() => setShowHeart(false));
+  };
+
+  return (
+    <Animated.View
+      style={[
+        styles.reelContainer,
+        { width, height: reelHeight, opacity, transform: [{ scale }] },
+      ]}
+    >
+      <TouchableOpacity
+        activeOpacity={1}
+        onPress={togglePlayPause}
+        style={StyleSheet.absoluteFill}
+      >
+        <VideoView
+          player={player}
+          style={StyleSheet.absoluteFill}
+          contentFit="cover"
+          nativeControls={false}
+        />
+      </TouchableOpacity>
+
+      {!localIsPlaying && isVisible && (
+        <View pointerEvents="none" style={styles.pauseIconContainer}>
+          <Ionicons color="rgba(255,255,255,0.7)" name="pause" size={60} />
+        </View>
+      )}
+
+      {/* Double Tap Heart Animation */}
+      {showHeart && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.heartAnimationContainer,
+            { transform: [{ scale: heartScale }] },
+          ]}
+        >
+          <Ionicons name="heart" size={100} color="#FFF" />
+        </Animated.View>
+      )}
+
+      {/* Mute/Unmute Button */}
+      <TouchableOpacity
+        style={[styles.muteBtn, { top: insets.top + 20, left: 20 }]}
+        onPress={onToggleMute}
+      >
+        <Ionicons
+          name={isMuted ? "volume-mute" : "volume-high"}
+          size={24}
+          color="#FFF"
+        />
+      </TouchableOpacity>
+
+      <LinearGradient
+        colors={["transparent", "rgba(0,0,0,0.85)"]}
+        style={styles.gradient}
+      />
+
+      <View style={[styles.rightActions, { bottom: 100 + insets.bottom }]}>
+        <TouchableOpacity onPress={() => onLike(item)} style={styles.actionBtn}>
+          <Ionicons
+            color={item.isLiked ? "#ff3b30" : "#FFF"}
+            name={item.isLiked ? "heart" : "heart-outline"}
+            size={32}
+          />
+          <Text style={styles.actionText}>{item.likes_count || 0}</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => onComment(item.id)}
+          style={styles.actionBtn}
+        >
+          <Ionicons color="#FFF" name="chatbubble-outline" size={28} />
+          <Text style={styles.actionText}>{item.comments_count || 0}</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => onShare(item.video_url)}
+          style={styles.actionBtn}
+        >
+          <Ionicons color="#FFF" name="share-social-outline" size={28} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() =>
+            onReport({
+              contentType: "reel",
+              contentId: String(item.id),
+              reportedUserId: item.user_id,
+            })
+          }
+          style={styles.actionBtn}
+          accessibilityRole="button"
+          accessibilityLabel="Report this reel"
+        >
+          <Ionicons color="#FFF" name="flag-outline" size={25} />
+        </TouchableOpacity>
+        {item.user_id && item.user_id !== currentUserId && (
+            <TouchableOpacity
+              onPress={() => onBlock(item.user_id, item.profiles?.name)}
+              style={styles.actionBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Block this user"
+            >
+              <Ionicons color="#FFF" name="person-remove-outline" size={25} />
+            </TouchableOpacity>
+        )}
+
+        {(isAdmin || item.user_id === currentUserId) && (
+          <TouchableOpacity
+            onPress={() => onDelete(item)}
+            style={styles.actionBtn}
+          >
+            <Ionicons color="#ff3b30" name="trash-outline" size={28} />
+          </TouchableOpacity>
+        )}
+      </View>
+
+      <View style={[styles.bottomInfo, { bottom: 40 + insets.bottom }]}>
+        <View style={styles.barberBadge}>
+          <Text style={styles.barberName}>
+            @{item.profiles?.name || "BarberUser"}
+          </Text>
+          <TouchableOpacity
+            style={[
+              styles.followBtn,
+              item.isFollowing && styles.followingBtnActive,
+            ]}
+            onPress={() => onFollow(item, item.user_id || "default_barber")}
+          >
+            <Text
+              style={[
+                styles.followText,
+                item.isFollowing && styles.followingTextActive,
+              ]}
+            >
+              {item.isFollowing ? "Following" : "Follow"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.description}>{item.caption}</Text>
+      </View>
+
+      {/* Glowing Progress Bar - Interactive & Draggable */}
+      <View
+        style={[styles.progressBarContainer, { bottom: insets.bottom + 15 }]}
+        {...panResponder.panHandlers}
+      >
+        <View style={styles.progressBarBackground}>
+          <View
+            style={[styles.progressBarFill, { width: `${progress * 100}%` }]}
+          >
+            {/* White Knob (Dot) - Animated for 2027 feel */}
+            <Animated.View
+              style={[
+                styles.progressKnob,
+                { transform: [{ scale: knobScale }] },
+              ]}
+            />
+          </View>
+        </View>
+      </View>
+    </Animated.View>
+  );
+};
 
 export default function ReelsScreen() {
+  const { height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+
+  const reelHeight =
+    Platform.OS === "android"
+      ? height + (StatusBar.currentHeight || 0)
+      : height;
+
   const [reels, setReels] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [activeReelIndex, setActiveReelIndex] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [primaryColor, setPrimaryColor] = useState("#CD813E");
+  const [blockedUserIds, setBlockedUserIds] = useState<string[]>([]);
+  const [feedError, setFeedError] = useState("");
 
   const [commentsVisible, setCommentsVisible] = useState(false);
   const [currentReelId, setCurrentReelId] = useState<string | null>(null);
   const [comments, setComments] = useState<any[]>([]);
-  const [newCommentText, setNewCommentText] = useState('');
+  const [newCommentText, setNewCommentText] = useState("");
   const [loadingComments, setLoadingComments] = useState(false);
-
-  const videoRefs = useRef<{ [key: string]: Video | null }>({});
+  const [isMuted, setIsMuted] = useState(false);
+  const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
+  const [reportReason, setReportReason] = useState("");
+  const [submittingReport, setSubmittingReport] = useState(false);
+  const scrollY = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     fetchReels();
@@ -46,120 +411,288 @@ export default function ReelsScreen() {
   const fetchReels = async () => {
     try {
       setLoading(true);
-      const sessionData = await supabase.auth.getSession();
-      const user = sessionData.data.session?.user;
+      const savedColor = await AsyncStorage.getItem("primaryColor");
+      if (savedColor) setPrimaryColor(savedColor);
+      const savedBlockedUsers = await AsyncStorage.getItem("blockedUserIds");
+      let blockedIds: string[] = [];
+      if (savedBlockedUsers) {
+        try {
+          const parsedBlockedUsers: unknown = JSON.parse(savedBlockedUsers);
+          if (
+            Array.isArray(parsedBlockedUsers) &&
+            parsedBlockedUsers.every((id) => typeof id === "string")
+          ) {
+            blockedIds = parsedBlockedUsers;
+          } else {
+            throw new Error("Blocked-account data is invalid.");
+          }
+        } catch (error) {
+          Alert.alert(
+            "Blocked accounts unavailable",
+            error instanceof Error
+              ? error.message
+              : "Could not read your blocked-account list.",
+          );
+        }
+      }
+      setBlockedUserIds(blockedIds);
+
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const user = session?.user;
       if (user) {
         setCurrentUserId(user.id);
+        setIsAdmin(user.email === "mohameddayan2@gmail.com");
       }
-      
+
+      // 1. Fetch all reels
       const { data: reelsData, error: reelsError } = await supabase
-        .from('reels')
-        .select('*')
-        .order('created_at', { ascending: false });
+        .from("reels")
+        .select("*")
+        .order("created_at", { ascending: false });
 
       if (reelsError) throw reelsError;
 
+      // 2. Fetch all profiles for names
+      const { data: profilesData } = await supabase
+        .from("profiles")
+        .select("id, name, email");
+      const profileMap: any = {};
+      if (profilesData)
+        profilesData.forEach((p) => {
+          profileMap[p.id] = p;
+        });
+
+      // 3. Fetch ALL likes to count them accurately
+      const { data: allLikes } = await supabase
+        .from("reel_likes")
+        .select("reel_id, user_id");
+      const likeCounts: any = {};
+      const userLikedReelIds: string[] = [];
+
+      if (allLikes) {
+        allLikes.forEach((l) => {
+          const rid = String(l.reel_id);
+          likeCounts[rid] = (likeCounts[rid] || 0) + 1;
+          if (user && l.user_id === user.id) userLikedReelIds.push(rid);
+        });
+      }
+
+      // 4. Fetch ALL comments to count them accurately
+      const { data: allComments } = await supabase
+        .from("comments")
+        .select("reel_id");
+      const commentCounts: any = {};
+      if (allComments) {
+        allComments.forEach((c) => {
+          const rid = String(c.reel_id);
+          commentCounts[rid] = (commentCounts[rid] || 0) + 1;
+        });
+      }
+
+      // 5. Fetch follows
       let followingIds: string[] = [];
       if (user) {
         const { data: followData } = await supabase
-          .from('follows')
-          .select('following_user_id')
-          .eq('follower_id', user.id);
-        
-        if (followData) {
+          .from("follows")
+          .select("following_user_id")
+          .eq("follower_id", user.id);
+        if (followData)
           followingIds = followData.map((f: any) => f.following_user_id);
-        }
       }
 
-      const formattedData = (reelsData || []).map(r => ({ 
-        ...r, 
-        isLiked: false,
-        isFollowing: r.user_id ? followingIds.includes(r.user_id) : false 
-      }));
+      // 6. Format final data
+      const formattedData = (reelsData || []).map((r) => {
+        const rid = String(r.id);
+        const matchedProfile = profileMap[r.user_id];
+        return {
+          ...r,
+          profiles: matchedProfile
+            ? {
+                name:
+                  matchedProfile.name || matchedProfile.email?.split("@")[0],
+              }
+            : { name: "BarberUser" },
+          isLiked: userLikedReelIds.includes(rid),
+          isFollowing: r.user_id ? followingIds.includes(r.user_id) : false,
+          likes_count: likeCounts[rid] || 0,
+          comments_count: commentCounts[rid] || 0,
+        };
+      });
 
-      setReels(formattedData);
+      setFeedError("");
+      setReels(
+        formattedData.filter((reel) => !blockedIds.includes(reel.user_id)),
+      );
     } catch (error: any) {
-      console.error('Error fetching reels:', error.message);
-      setReels([
-        { 
-          id: '1', 
-          caption: 'Classic Fade with a twist! #BarberLife', 
-          likes_count: 1200, 
-          comments_count: 5,
-          video_url: 'https://d23dyxeqlo5psv.cloudfront.net/big_buck_bunny.mp4',
-          isLiked: false,
-          isFollowing: false
-        }
-      ]);
+      console.error("Error fetching reels:", error.message);
+      setFeedError(error.message || "Could not load reels. Please try again.");
+      setReels([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const handlePickVideo = async () => {
-    try {
-      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permissionResult.granted) {
-        Alert.alert("Permission required", "We need access to your gallery!");
-        return;
-      }
+  const requestReport = (target: ReportTarget) => {
+    setReportTarget(target);
+    setReportReason("");
+  };
 
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Videos,
-        allowsEditing: true,
-        quality: 1,
-      });
-
-      if (result.canceled || !result.assets?.[0]?.uri) return;
-
-      uploadReel(result.assets[0].uri);
-    } catch (error) {
-      Alert.alert("Error", "Could not pick video");
+  const submitReport = async () => {
+    const reason = reportReason.trim();
+    if (!reportTarget || !reason) {
+      Alert.alert("Reason required", "Please describe why you are reporting this content.");
+      return;
     }
+
+    setSubmittingReport(true);
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const { error } = await supabase.from("content_reports").insert({
+        content_type: reportTarget.contentType,
+        target_content_id: reportTarget.contentId,
+        reported_user_id: reportTarget.reportedUserId ?? null,
+        reporter_user_id: session?.user.id ?? null,
+        reason,
+      });
+      if (error) throw error;
+
+      setReportTarget(null);
+      setReportReason("");
+      Alert.alert(
+        "Report received",
+        "Thank you. Our moderation team will review this content.",
+      );
+    } catch (error) {
+      Alert.alert(
+        "Report not sent",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    } finally {
+      setSubmittingReport(false);
+    }
+  };
+
+  const blockUser = (userId: string, userName?: string) => {
+    Alert.alert(
+      "Block this account?",
+      `${userName || "This user"}'s reels and comments will be hidden on this device.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Block",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const savedBlockedUsers =
+                await AsyncStorage.getItem("blockedUserIds");
+              let existingIds: string[] = [];
+              if (savedBlockedUsers) {
+                const parsed: unknown = JSON.parse(savedBlockedUsers);
+                if (
+                  !Array.isArray(parsed) ||
+                  !parsed.every((id) => typeof id === "string")
+                ) {
+                  throw new Error("Your blocked-account list is invalid.");
+                }
+                existingIds = parsed;
+              }
+              const nextBlockedIds = Array.from(
+                new Set([...existingIds, userId]),
+              );
+              setBlockedUserIds(nextBlockedIds);
+              setReels((current) =>
+                current.filter((reel) => reel.user_id !== userId),
+              );
+              setComments((current) =>
+                current.filter((comment) => comment.user_id !== userId),
+              );
+              setActiveReelIndex(0);
+              await AsyncStorage.setItem(
+                "blockedUserIds",
+                JSON.stringify(nextBlockedIds),
+              );
+
+              const {
+                data: { session },
+              } = await supabase.auth.getSession();
+              const { error } = await supabase.from("content_reports").insert({
+                content_type: "user_block",
+                target_content_id: userId,
+                reported_user_id: userId,
+                reporter_user_id: session?.user.id ?? null,
+                reason: `User blocked ${userName || userId}. Content hidden on this device.`,
+              });
+              if (error) {
+                Alert.alert(
+                  "User blocked locally",
+                  `This user's content is hidden on this device, but the moderation team could not be notified: ${error.message}`,
+                );
+              }
+            } catch (error) {
+              Alert.alert(
+                "User blocked locally",
+                `This user's content is hidden for now, but the block could not be saved or sent to moderation. ${
+                  error instanceof Error ? error.message : "Please try again."
+                }`,
+              );
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handlePickVideo = async () => {
+    const permissionResult =
+      await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permissionResult.granted) {
+      Alert.alert("Permission required", "Gallery access needed!");
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+      allowsEditing: true,
+      quality: 1,
+    });
+    if (result.canceled || !result.assets?.[0]?.uri) return;
+    uploadReel(result.assets[0].uri);
   };
 
   const uploadReel = async (videoUri: string) => {
     try {
       setUploading(true);
       const user = (await supabase.auth.getSession()).data.session?.user;
-      if (!user) {
-        Alert.alert("Auth Required", "Please log in to upload reels");
-        return;
-      }
-
-      const fileExt = videoUri.split('.').pop();
+      if (!user) return;
+      const fileExt = videoUri.split(".").pop();
       const fileName = `reel-${Date.now()}.${fileExt}`;
       const filePath = `${user.id}/${fileName}`;
-
       const response = await fetch(videoUri);
       const blob = await response.blob();
       const arrayBuffer = await new Response(blob).arrayBuffer();
-
       const { error: uploadError } = await supabase.storage
-        .from('reels')
+        .from("reels")
         .upload(filePath, arrayBuffer, {
           contentType: `video/${fileExt}`,
-          upsert: true
+          upsert: true,
         });
-
       if (uploadError) throw uploadError;
-
-      const { data: { publicUrl } } = supabase.storage.from('reels').getPublicUrl(filePath);
-
-      const { error: dbError } = await supabase
-        .from('reels')
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from("reels").getPublicUrl(filePath);
+      await supabase
+        .from("reels")
         .insert([
           {
             user_id: user.id,
             video_url: publicUrl,
-            caption: 'New Barber Style Reel! #BarberStyle',
-            likes_count: 0
-          }
+            caption: "New Style!",
+            likes_count: 0,
+          },
         ]);
-
-      if (dbError) throw dbError;
-
-      Alert.alert("Success", "Reel uploaded successfully!");
       fetchReels();
     } catch (error: any) {
       Alert.alert("Upload Failed", error.message);
@@ -169,86 +702,87 @@ export default function ReelsScreen() {
   };
 
   const handleDeleteReel = async (item: any) => {
-    Alert.alert(
-      "Delete Reel",
-      "Are you sure you want to delete this reel?",
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "Delete", 
-          style: "destructive", 
-          onPress: async () => {
-            try {
-              // حذف السجل مباشرة من قاعدة البيانات
-              const { error: dbError } = await supabase
-                .from('reels')
-                .delete()
-                .eq('id', item.id);
-
-              if (dbError) throw dbError;
-
-              // محاولة حذف الملف من Storage إذا أمكن
-              if (item.video_url && currentUserId) {
-                const urlParts = item.video_url.split('/');
-                const fileName = urlParts[urlParts.length - 1];
-                const filePath = `${currentUserId}/${fileName}`;
-                await supabase.storage.from('reels').remove([filePath]);
-              }
-
-              setReels(prev => prev.filter(r => r.id !== item.id));
-              Alert.alert("Success", "Reel deleted successfully");
-            } catch (error: any) {
-              Alert.alert("Error", error.message);
-            }
-          }
-        }
-      ]
-    );
+    Alert.alert("Delete Reel", "Are you sure?", [
+      { text: "Cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          await supabase.from("reels").delete().eq("id", item.id);
+          setReels((prev) => prev.filter((r) => r.id !== item.id));
+        },
+      },
+    ]);
   };
 
   const handleLike = async (item: any) => {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const user = session?.user;
+    if (!user) {
+      Alert.alert("Login Required", "Please login to like reels.");
+      return;
+    }
+
+    const isCurrentlyLiked = item.isLiked;
+    const currentCount = Number(item.likes_count || 0);
+    const newCount = isCurrentlyLiked
+      ? Math.max(0, currentCount - 1)
+      : currentCount + 1;
+
+    // Update UI immediately
+    setReels((prev) => [
+      ...prev.map((r) =>
+        String(r.id) === String(item.id)
+          ? { ...r, likes_count: newCount, isLiked: !isCurrentlyLiked }
+          : r,
+      ),
+    ]);
+
     try {
-      const alreadyLiked = item.isLiked;
-      const newCount = alreadyLiked ? (item.likes_count - 1) : (item.likes_count + 1);
-      const updatedLikedState = !alreadyLiked;
-
-      setReels(prev => prev.map(r => r.id === item.id ? { ...r, likes_count: newCount, isLiked: updatedLikedState } : r));
-
+      const reelIdNum = Number(item.id);
+      if (isCurrentlyLiked) {
+        await supabase
+          .from("reel_likes")
+          .delete()
+          .eq("user_id", user.id)
+          .eq("reel_id", reelIdNum);
+      } else {
+        await supabase
+          .from("reel_likes")
+          .insert([{ user_id: user.id, reel_id: reelIdNum }]);
+      }
       await supabase
-        .from('reels')
+        .from("reels")
         .update({ likes_count: newCount })
-        .eq('id', item.id);
+        .eq("id", reelIdNum);
     } catch (error) {
-      console.error("Error toggling like", error);
+      console.error("Error toggling like:", error);
     }
   };
 
   const handleFollow = async (item: any, barberId: string) => {
-    try {
-      const user = (await supabase.auth.getSession()).data.session?.user;
-      if (!user) {
-        Alert.alert("Auth Required", "Please log in to follow barbers");
-        return;
-      }
-
-      const currentFollowState = item.isFollowing;
-
-      setReels(prev => prev.map(r => r.id === item.id ? { ...r, isFollowing: !currentFollowState } : r));
-
-      if (currentFollowState) {
-        await supabase
-          .from('follows')
-          .delete()
-          .eq('follower_id', user.id)
-          .eq('following_user_id', barberId);
-      } else {
-        await supabase
-          .from('follows')
-          .insert([{ follower_id: user.id, following_user_id: barberId }]);
-      }
-    } catch (error) {
-      console.error("Error toggling follow:", error);
-      fetchReels();
+    const user = (await supabase.auth.getSession()).data.session?.user;
+    if (!user) {
+      Alert.alert("Login Required", "Please sign in to follow users.");
+      return;
+    }
+    setReels((prev) =>
+      prev.map((r) =>
+        r.id === item.id ? { ...r, isFollowing: !item.isFollowing } : r,
+      ),
+    );
+    if (item.isFollowing) {
+      await supabase
+        .from("follows")
+        .delete()
+        .eq("follower_id", user.id)
+        .eq("following_user_id", barberId);
+    } else {
+      await supabase
+        .from("follows")
+        .insert([{ follower_id: user.id, following_user_id: barberId }]);
     }
   };
 
@@ -259,16 +793,19 @@ export default function ReelsScreen() {
 
     try {
       const { data, error } = await supabase
-        .from('comments')
-        .select('*')
-        .eq('reel_id', reelId)
-        .order('created_at', { ascending: false });
+        .from("comments")
+        .select("*")
+        .eq("reel_id", reelId)
+        .order("created_at", { ascending: false });
 
       if (error) throw error;
-      setComments(data || []);
-    } catch (error) {
-      console.error("Error fetching comments:", error);
-      setComments([]);
+      setComments(
+        (data || []).filter(
+          (comment) => !blockedUserIds.includes(comment.user_id),
+        ),
+      );
+    } catch (err) {
+      console.error("Error fetching comments:", err);
     } finally {
       setLoadingComments(false);
     }
@@ -276,245 +813,580 @@ export default function ReelsScreen() {
 
   const handleAddComment = async () => {
     if (!newCommentText.trim() || !currentReelId) return;
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const user = session?.user;
+    if (!user) {
+      Alert.alert("Login Required", "Please login to comment.");
+      return;
+    }
+
+    const reelIdNum = Number(currentReelId);
+    const commentObj = {
+      reel_id: reelIdNum,
+      user_id: user.id,
+      username: user.email ? user.email.split("@")[0] : "BarberUser",
+      text: newCommentText.trim(),
+      created_at: new Date().toISOString(),
+    };
+
+    setComments([commentObj, ...comments]);
+    setNewCommentText("");
 
     try {
-      const user = (await supabase.auth.getSession()).data.session?.user;
-      const commentObj = {
-        reel_id: currentReelId,
-        user_id: user?.id || 'guest',
-        username: user?.email ? user.email.split('@')[0] : 'BarberUser',
-        text: newCommentText.trim(),
-        created_at: new Date().toISOString(),
-      };
-
-      setComments([commentObj, ...comments]);
-      setNewCommentText('');
-
-      await supabase.from('comments').insert([commentObj]);
-
-      setReels(prev => prev.map(r => {
-        if (r.id === currentReelId) {
-          const newCommCount = (r.comments_count || 0) + 1;
-          supabase.from('reels').update({ comments_count: newCommCount }).eq('id', currentReelId);
-          return { ...r, comments_count: newCommCount };
-        }
-        return r;
-      }));
-
+      await supabase.from("comments").insert([commentObj]);
+      // Update the reel's comment count in the list
+      setReels((prev) =>
+        prev.map((r) =>
+          String(r.id) === String(currentReelId)
+            ? { ...r, comments_count: (Number(r.comments_count) || 0) + 1 }
+            : r,
+        ),
+      );
+      // Also update in DB
+      const currentReel = reels.find(
+        (r) => String(r.id) === String(currentReelId),
+      );
+      const newCommentCount = (Number(currentReel?.comments_count) || 0) + 1;
+      await supabase
+        .from("reels")
+        .update({ comments_count: newCommentCount })
+        .eq("id", reelIdNum);
     } catch (error) {
       console.error("Error adding comment:", error);
     }
   };
 
   const handleShare = async (videoUrl: string) => {
-    try {
-      await Share.share({
-        message: `Check out this amazing haircut reel on BarberApp! ${videoUrl}`,
-        url: videoUrl,
-      });
-    } catch (error) {
-      console.error("Error sharing video", error);
-    }
-  };
-
-  const togglePlayPause = () => {
-    setIsPlaying(!isPlaying);
-  };
-
-  const renderReel = ({ item, index }: { item: any, index: number }) => {
-    const isVisible = index === activeReelIndex;
-    
-    return (
-      <View style={styles.reelContainer}>
-        <TouchableOpacity activeOpacity={1} onPress={togglePlayPause} style={StyleSheet.absoluteFill}>
-          <Video
-            ref={(ref: Video | null) => {
-              videoRefs.current[item.id] = ref;
-            }}
-            source={{ uri: item.video_url }}
-            style={StyleSheet.absoluteFill}
-            resizeMode={ResizeMode.COVER}
-            shouldPlay={isVisible && isPlaying}
-            isLooping
-            useNativeControls={false}
-          />
-        </TouchableOpacity>
-
-        {!isPlaying && isVisible && (
-          <View pointerEvents="none" style={styles.pauseIconContainer}>
-            <Ionicons color="rgba(255,255,255,0.7)" name="pause" size={60} />
-          </View>
-        )}
-
-        <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.gradient} />
-
-        <View style={styles.rightActions}>
-          <TouchableOpacity onPress={() => handleLike(item)} style={styles.actionBtn}>
-            <Ionicons 
-              color={item.isLiked ? "#ff3b30" : "#FFF"} 
-              name={item.isLiked ? "heart" : "heart-outline"} 
-              size={32} 
-            />
-            <Text style={styles.actionText}>{item.likes_count || 0}</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={() => openComments(item.id)} style={styles.actionBtn}>
-            <Ionicons color="#FFF" name="chatbubble-outline" size={28} />
-            <Text style={styles.actionText}>{item.comments_count || 0}</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={() => handleShare(item.video_url)} style={styles.actionBtn}>
-            <Ionicons color="#FFF" name="share-social-outline" size={28} />
-          </TouchableOpacity>
-
-          {/* زر الحذف يظهر الآن مباشرة لجميع الفيديوهات لتسهيل الحذف */}
-          <TouchableOpacity onPress={() => handleDeleteReel(item)} style={styles.actionBtn}>
-            <Ionicons color="#ff3b30" name="trash-outline" size={28} />
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.bottomInfo}>
-          <View style={styles.barberBadge}>
-            <Text style={styles.barberName}>@BarberStyle</Text>
-            <TouchableOpacity 
-              style={[styles.followBtn, item.isFollowing && styles.followingBtnActive]} 
-              onPress={() => handleFollow(item, item.user_id || 'default_barber')}
-            >
-              <Text style={[styles.followText, item.isFollowing && styles.followingTextActive]}>
-                {item.isFollowing ? 'Following' : 'Follow'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.description}>{item.caption}</Text>
-        </View>
-      </View>
-    );
+    Share.share({ message: `Check this out! ${videoUrl}` });
   };
 
   return (
     <View style={styles.container}>
-      <StatusBar backgroundColor="transparent" barStyle="light-content" translucent />
-      
+      <StatusBar
+        backgroundColor="transparent"
+        barStyle="light-content"
+        translucent
+      />
+
+      {/* Glowing Reels Header */}
+      <View style={[styles.reelsHeader, { top: insets.top + 20 }]}>
+        <Text style={styles.reelsHeaderText}>Reels</Text>
+      </View>
+
       {loading ? (
         <View style={styles.center}>
-          <ActivityIndicator color="#CD813E" size="large" />
+          <ActivityIndicator size="large" color={primaryColor} />
         </View>
       ) : (
-        <FlatList 
+        <Animated.FlatList
           data={reels}
-          decelerationRate="fast" 
-          keyExtractor={(item) => item.id.toString()} 
-          pagingEnabled 
-          showsVerticalScrollIndicator={false} 
-          snapToInterval={height}
-          renderItem={renderReel}
+          extraData={reels}
+          keyExtractor={(item) => String(item.id)}
+          pagingEnabled
+          showsVerticalScrollIndicator={false}
+          snapToInterval={reelHeight}
+          snapToAlignment="start"
+          decelerationRate="fast"
+          onScroll={Animated.event(
+            [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+            { useNativeDriver: true },
+          )}
           onMomentumScrollEnd={(e) => {
-            const index = Math.round(e.nativeEvent.contentOffset.y / height);
+            const index = Math.round(
+              e.nativeEvent.contentOffset.y / reelHeight,
+            );
             setActiveReelIndex(index);
-            setIsPlaying(true);
           }}
+          renderItem={({ item, index }) => (
+            <ReelItem
+              item={item}
+              index={index}
+              scrollY={scrollY}
+              isVisible={index === activeReelIndex}
+              insets={insets}
+              reelHeight={reelHeight}
+              isAdmin={isAdmin}
+              currentUserId={currentUserId}
+              onLike={handleLike}
+              onComment={openComments}
+              onShare={handleShare}
+              onDelete={handleDeleteReel}
+              onReport={requestReport}
+              onBlock={blockUser}
+              onFollow={handleFollow}
+              isMuted={isMuted}
+              onToggleMute={() => setIsMuted(!isMuted)}
+            />
+          )}
+          ListEmptyComponent={
+            <View style={[styles.emptyFeed, { height: reelHeight }]}>
+              <Ionicons
+                name={feedError ? "cloud-offline-outline" : "videocam-outline"}
+                size={54}
+                color={primaryColor}
+              />
+              <Text style={styles.emptyFeedTitle}>
+                {feedError ? "Reels unavailable" : "No reels yet"}
+              </Text>
+              <Text style={styles.emptyFeedMessage}>
+                {feedError
+                  ? feedError
+                  : "Check back soon for fresh cuts and style inspiration."}
+              </Text>
+              {feedError ? (
+                <TouchableOpacity
+                  style={[styles.retryButton, { borderColor: primaryColor }]}
+                  onPress={fetchReels}
+                >
+                  <Text style={[styles.retryButtonText, { color: primaryColor }]}>
+                    Try again
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          }
         />
       )}
 
-      <TouchableOpacity disabled={uploading} onPress={handlePickVideo} style={styles.uploadBtn}>
-        {uploading ? (
-          <ActivityIndicator color="#FFF" />
-        ) : (
-          <Ionicons color="#FFF" name="add" size={26} />
-        )}
-      </TouchableOpacity>
+      {/* Upload Button */}
+      {isAdmin && (
+        <TouchableOpacity
+          style={[
+            styles.uploadBtn2026,
+            {
+              top: insets.top + 20,
+              right: 20,
+              backgroundColor: "rgba(255,255,255,0.15)",
+              borderColor: primaryColor,
+            },
+          ]}
+          onPress={handlePickVideo}
+        >
+          {uploading ? (
+            <ActivityIndicator color={primaryColor} />
+          ) : (
+            <View style={styles.uploadBtnContent}>
+              <Ionicons name="add-circle" size={24} color={primaryColor} />
+              <Text style={[styles.uploadBtnText, { color: primaryColor }]}>
+                Post
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      )}
 
-      <Modal animationType="slide" onRequestClose={() => setCommentsVisible(false)} transparent={true} visible={commentsVisible}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+      {/* Comments Modal */}
+      <Modal visible={commentsVisible} animationType="slide" transparent>
+        <View style={styles.modalContainer}>
+          <TouchableOpacity
+            style={styles.modalCloseArea}
+            onPress={() => setCommentsVisible(false)}
+          />
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            style={styles.modalContent}
+          >
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Comments</Text>
               <TouchableOpacity onPress={() => setCommentsVisible(false)}>
-                <Ionicons color="#FFF" name="close" size={24} />
+                <Ionicons name="close" size={24} color="#FFF" />
               </TouchableOpacity>
             </View>
 
             {loadingComments ? (
-              <ActivityIndicator color="#CD813E" size="small" style={{ marginTop: 20 }} />
+              <ActivityIndicator style={{ margin: 20 }} color={primaryColor} />
             ) : (
-              <FlatList 
-                data={comments} 
-                keyExtractor={(item, index) => item.id?.toString() || index.toString()}
+              <FlatList
+                data={comments}
+                keyExtractor={(_, idx) => idx.toString()}
                 renderItem={({ item }) => (
                   <View style={styles.commentItem}>
-                    <Text style={styles.commentUser}>@{item.username || 'User'}</Text>
+                    <Text style={styles.commentUser}>@{item.username}</Text>
                     <Text style={styles.commentText}>{item.text}</Text>
+                    <View style={styles.commentModeration}>
+                      <TouchableOpacity
+                        onPress={() => {
+                          setCommentsVisible(false);
+                          requestReport({
+                            contentType: "comment",
+                            contentId: String(item.id),
+                            reportedUserId: item.user_id,
+                          });
+                        }}
+                        accessibilityRole="button"
+                      >
+                        <Text style={styles.moderationAction}>Report</Text>
+                      </TouchableOpacity>
+                      {item.user_id && item.user_id !== currentUserId && (
+                        <TouchableOpacity
+                          onPress={() =>
+                            blockUser(item.user_id, item.username)
+                          }
+                          accessibilityRole="button"
+                        >
+                          <Text style={styles.moderationAction}>Block user</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
                   </View>
                 )}
-                ListEmptyComponent={<Text style={styles.noComments}>No comments yet. Be the first!</Text>}
-                style={styles.commentsList}
+                ListEmptyComponent={
+                  <Text style={styles.noComments}>No comments yet.</Text>
+                }
               />
             )}
 
-            <View style={styles.commentInputContainer}>
-              <TextInput 
-                onChangeText={setNewCommentText} 
-                placeholder="Add a comment..." 
-                placeholderTextColor="#888" 
-                style={styles.commentInput} 
-                value={newCommentText} 
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.input}
+                placeholder="Add a comment..."
+                placeholderTextColor="#888"
+                value={newCommentText}
+                onChangeText={setNewCommentText}
               />
-              <TouchableOpacity onPress={handleAddComment} style={styles.sendBtn}>
-                <Ionicons color="#CD813E" name="send" size={20} />
+              <TouchableOpacity onPress={handleAddComment}>
+                <Ionicons name="send" size={24} color={primaryColor} />
+              </TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={reportTarget !== null}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setReportTarget(null)}
+      >
+        <View style={styles.reportOverlay}>
+          <View style={styles.reportCard}>
+            <Text style={styles.modalTitle}>Report content</Text>
+            <Text style={styles.reportDescription}>
+              Tell us why this {reportTarget?.contentType} violates our
+              community standards. Reports are reviewed by the moderation
+              team.
+            </Text>
+            <TextInput
+              style={styles.reportInput}
+              placeholder="Describe the issue (required)"
+              placeholderTextColor="#888"
+              value={reportReason}
+              onChangeText={setReportReason}
+              maxLength={1000}
+              multiline
+              textAlignVertical="top"
+              accessibilityLabel="Reason for reporting"
+            />
+            <View style={styles.reportActions}>
+              <TouchableOpacity
+                style={styles.reportCancelButton}
+                onPress={() => setReportTarget(null)}
+                disabled={submittingReport}
+              >
+                <Text style={styles.reportCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.reportSubmitButton,
+                  { backgroundColor: primaryColor },
+                  submittingReport && styles.reportButtonDisabled,
+                ]}
+                onPress={submitReport}
+                disabled={submittingReport}
+              >
+                <Text style={styles.reportSubmitText}>
+                  {submittingReport ? "Sending..." : "Submit report"}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  reelContainer: { width, height },
-  gradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '45%' },
+  container: { flex: 1, backgroundColor: "#000" },
+  center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  emptyFeed: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 36,
+    backgroundColor: "#0B0B0B",
+  },
+  emptyFeedTitle: {
+    color: "#FFF",
+    fontSize: 22,
+    fontWeight: "700",
+    marginTop: 18,
+  },
+  emptyFeedMessage: {
+    color: "#999",
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: "center",
+    marginTop: 8,
+  },
+  retryButton: {
+    marginTop: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 18,
+    borderWidth: 1,
+  },
+  retryButtonText: { fontSize: 14, fontWeight: "700" },
+  reelContainer: { backgroundColor: "#000" },
+  gradient: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: "40%",
+  },
+  rightActions: {
+    position: "absolute",
+    right: 15,
+    alignItems: "center",
+    gap: 20,
+  },
+  actionBtn: { alignItems: "center" },
+  actionText: { color: "#FFF", fontSize: 12, marginTop: 4, fontWeight: "bold" },
+  bottomInfo: { position: "absolute", left: 20, right: 80 },
+  barberBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 8,
+  },
+  barberName: { color: "#FFF", fontSize: 16, fontWeight: "bold" },
+  followBtn: {
+    borderWidth: 1,
+    borderColor: "#FFF",
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  followingBtnActive: {
+    backgroundColor: "rgba(255,255,255,0.2)",
+    borderColor: "transparent",
+  },
+  followText: { color: "#FFF", fontSize: 12, fontWeight: "bold" },
+  followingTextActive: { opacity: 0.8 },
+  description: { color: "#FFF", fontSize: 14, lineHeight: 20 },
   pauseIconContainer: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    transform: [{ translateX: -30 }, { translateY: -30 }],
-    zIndex: 5,
+    ...StyleSheet.absoluteFill,
+    justifyContent: "center",
+    alignItems: "center",
   },
-  rightActions: { position: 'absolute', right: 15, bottom: 100, alignItems: 'center' },
-  actionBtn: { marginBottom: 20, alignItems: 'center' },
-  actionText: { color: '#FFF', fontSize: 13, fontWeight: '600', marginTop: 4 },
-  bottomInfo: { position: 'absolute', bottom: 35, left: 20, right: 80 },
-  barberBadge: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  barberName: { color: '#FFF', fontWeight: '900', fontSize: 15, marginRight: 12 },
-  followBtn: { borderWidth: 1, borderColor: '#FFF', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 6 },
-  followText: { color: '#FFF', fontSize: 11, fontWeight: 'bold' },
-  followingBtnActive: { backgroundColor: '#FFF', borderColor: '#FFF' },
-  followingTextActive: { color: '#000' },
-  description: { color: '#FFF', fontSize: 13, lineHeight: 18, opacity: 0.9 },
-  uploadBtn: { 
-    position: 'absolute', 
-    top: 50, 
-    right: 20, 
-    zIndex: 10, 
-    backgroundColor: '#CD813E', 
-    width: 38, 
-    height: 38, 
-    borderRadius: 19, 
-    justifyContent: 'center', 
-    alignItems: 'center' 
+  heartAnimationContainer: {
+    ...StyleSheet.absoluteFill,
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 10,
   },
-  modalOverlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
-  modalContent: { height: '55%', backgroundColor: '#111', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20 },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#222', paddingBottom: 10 },
-  modalTitle: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
-  commentsList: { marginTop: 10, flex: 1 },
-  commentItem: { marginBottom: 15 },
-  commentUser: { color: '#CD813E', fontWeight: 'bold', fontSize: 13, marginBottom: 2 },
-  commentText: { color: '#FFF', fontSize: 13 },
-  noComments: { color: '#777', textAlign: 'center', marginTop: 30 },
-  commentInputContainer: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#222', paddingTop: 10 },
-  commentInput: { flex: 1, backgroundColor: '#222', color: '#FFF', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 20, fontSize: 13 },
-  sendBtn: { marginLeft: 10, padding: 5 },
+  muteBtn: {
+    position: "absolute",
+    zIndex: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "rgba(0,0,0,0.3)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+  },
+  uploadBtn2026: {
+    position: "absolute",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 25,
+    borderWidth: 1.5,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 100,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+    elevation: 8,
+  },
+  reelsHeader: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    zIndex: 10,
+  },
+  reelsHeaderText: {
+    color: "#FFF",
+    fontSize: 22,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    textTransform: "none", // Ensures "Reels" case is preserved
+  },
+  progressBarContainer: {
+    position: "absolute",
+    left: 20,
+    right: 20,
+    height: 20, // Increased hit area for touch
+    justifyContent: "center",
+    zIndex: 10,
+  },
+  touchableBar: {
+    width: "100%",
+    height: "100%",
+    justifyContent: "center",
+  },
+  progressBarBackground: {
+    height: 4,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    borderRadius: 2,
+    overflow: "hidden",
+  },
+  progressBarFill: {
+    height: "100%",
+    backgroundColor: "#FFF",
+    borderRadius: 2,
+    shadowColor: "#FFF",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 15,
+    elevation: 5,
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+  },
+  progressKnob: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: "#FFF",
+    shadowColor: "#FFF",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 5,
+    elevation: 5,
+    marginRight: -4,
+  },
+  uploadBtnContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  uploadBtnText: {
+    fontSize: 14,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  modalContainer: { flex: 1, justifyContent: "flex-end" },
+  modalCloseArea: { flex: 1 },
+  modalContent: {
+    backgroundColor: "#1A1A1A",
+    height: "60%",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 20,
+  },
+  modalTitle: { color: "#FFF", fontSize: 18, fontWeight: "bold" },
+  commentItem: {
+    marginBottom: 15,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#2A2A2A",
+  },
+  commentUser: {
+    color: "#CD813E",
+    fontSize: 13,
+    fontWeight: "bold",
+    marginBottom: 2,
+  },
+  commentText: { color: "#EEE", fontSize: 14 },
+  commentModeration: {
+    flexDirection: "row",
+    gap: 18,
+    marginTop: 8,
+  },
+  moderationAction: { color: "#CD813E", fontSize: 12, fontWeight: "700" },
+  noComments: { color: "#888", textAlign: "center", marginTop: 20 },
+  inputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#333",
+    paddingTop: 15,
+  },
+  input: {
+    flex: 1,
+    backgroundColor: "#333",
+    borderRadius: 20,
+    paddingHorizontal: 15,
+    height: 40,
+    color: "#FFF",
+  },
+  reportOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.8)",
+    padding: 20,
+  },
+  reportCard: {
+    width: "100%",
+    maxWidth: 420,
+    backgroundColor: "#1A1A1A",
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#333",
+    padding: 20,
+  },
+  reportDescription: {
+    color: "#AAA",
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 8,
+    marginBottom: 14,
+  },
+  reportInput: {
+    minHeight: 110,
+    maxHeight: 180,
+    backgroundColor: "#292929",
+    borderRadius: 12,
+    padding: 12,
+    color: "#FFF",
+    fontSize: 14,
+    borderWidth: 1,
+    borderColor: "#3A3A3A",
+  },
+  reportActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+    marginTop: 16,
+  },
+  reportCancelButton: {
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  reportCancelText: { color: "#BBB", fontSize: 13, fontWeight: "700" },
+  reportSubmitButton: {
+    minHeight: 42,
+    justifyContent: "center",
+    paddingHorizontal: 14,
+    borderRadius: 12,
+  },
+  reportSubmitText: { color: "#FFF", fontSize: 13, fontWeight: "800" },
+  reportButtonDisabled: { opacity: 0.6 },
 });

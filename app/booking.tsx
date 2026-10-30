@@ -4,13 +4,12 @@ import { BlurView } from "expo-blur";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
     Dimensions,
     Linking,
-    Platform,
     Pressable,
     ScrollView,
     StatusBar,
@@ -18,6 +17,8 @@ import {
     Text,
     View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useGuestMode } from "../lib/guestMode";
 import { supabase } from "../lib/supabase";
 
 const { width, height } = Dimensions.get("window");
@@ -25,38 +26,46 @@ const { width, height } = Dimensions.get("window");
 const THEME = {
   colors: {
     primary: "#CD813E",
-    bg: "#0B0B0B",
-    cardBg: "#141414",
+    bg: "#000",
+    cardBg: "rgba(20, 20, 20, 0.8)",
     white: "#FFF",
-    text: "#1A1A1A",
-    heart: "#FF4B4B",
-    primaryGold: "#D4AF37",
-    border: "#262626",
+    text: "#FFF",
+    primaryGold: "#FFD700",
+    border: "rgba(255, 255, 255, 0.1)",
   },
 };
 
 const BookingScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams();
+  const insets = useSafeAreaInsets();
+  const { setGuestMode } = useGuestMode();
 
   const [selectedDateId, setSelectedDateId] = useState("0");
   const [selectedTime, setSelectedTime] = useState("09:30");
   const [isFavorite, setIsFavorite] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [bookedSlots, setBookedSlots] = useState<string[]>([]);
-
-  // استقبال الخدمة أو الستايل المختار تلقائياً (Frontend State Sync)
-  const [selectedService, setSelectedService] = useState(
-    (params.selectedLook as string) || (params.selectedService as string) || "Classic Haircut & Beard"
-  );
+  const [bookedSlots, setBookedSlots] = useState<any[]>([]);
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  const [availabilityError, setAvailabilityError] = useState("");
+  const [workingHours, setWorkingHours] = useState({
+    start: "09:00",
+    end: "21:00",
+  });
+  const [primaryColor, setPrimaryColor] = useState("#CD813E");
 
   useEffect(() => {
-    if (params.selectedLook) {
-      setSelectedService(params.selectedLook as string);
-    }
-  }, [params.selectedLook]);
+    AsyncStorage.getItem("primaryColor").then((color) => {
+      if (color) setPrimaryColor(color);
+    });
+  }, []);
 
-  // 1. الأيام
+  const [selectedService] = useState(
+    (params.selectedLook as string) ||
+      (params.selectedService as string) ||
+      "Classic Haircut & Beard",
+  );
+
   const generateDateList = useMemo(() => {
     const dateList = [];
     const today = new Date();
@@ -73,14 +82,16 @@ const BookingScreen = () => {
     return dateList;
   }, []);
 
-  // 2. السوايع
   const generateTimeSlots = useMemo(() => {
     const slots = [];
-    let hour = 9;
+    const startHour = parseInt(workingHours.start.split(":")[0]);
+    const endHour = parseInt(workingHours.end.split(":")[0]);
+
+    let hour = startHour;
     let minute = 0;
-    while (hour < 21) {
+    while (hour < endHour) {
       slots.push(
-        `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`
+        `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`,
       );
       minute += 30;
       if (minute === 60) {
@@ -89,32 +100,43 @@ const BookingScreen = () => {
       }
     }
     return slots;
-  }, []);
+  }, [workingHours]);
 
-  // 3. جلب البيانات من السوبابيس
   const fetchBookedSlots = async () => {
+    setAvailabilityLoading(true);
+    setAvailabilityError("");
     try {
-      const selectedDateObj = generateDateList[parseInt(selectedDateId)];
+      const selectedDateObj = generateDateList[parseInt(selectedDateId, 10)];
+      if (!selectedDateObj)
+        throw new Error("Could not read the selected date.");
       const fullDate = `${selectedDateObj.day}, ${selectedDateObj.num}`;
+      const savedHours = await AsyncStorage.getItem("workingHours");
+      if (savedHours) setWorkingHours(JSON.parse(savedHours));
 
-      const { data, error } = await supabase
-        .from("bookings")
-        .select("booking_time")
-        .eq("booking_date", fullDate)
-        .eq("barber_name", params.barberName || "Simo Dayyan");
-
+      // This RPC returns only busy slot fields; it does not expose other customers' data.
+      const { data, error } = await (supabase as any).rpc(
+        "get_booking_availability",
+        {
+          p_booking_date: fullDate,
+          p_barber_name: String(params.barberName || "Simo Dayyan"),
+        },
+      );
       if (error) throw error;
-      setBookedSlots(data ? data.map((b: any) => b.booking_time) : []);
-    } catch (e) {
-      console.warn("Booking slots unavailable, using empty state:", e);
+      setBookedSlots(data || []);
+    } catch (error: any) {
       setBookedSlots([]);
+      setAvailabilityError(
+        error.message || "Could not verify available times.",
+      );
+    } finally {
+      setAvailabilityLoading(false);
     }
   };
 
   useEffect(() => {
     checkIfFavorite();
     fetchBookedSlots();
-  }, [selectedDateId]);
+  }, [selectedDateId, params.barberName]);
 
   const checkIfFavorite = async () => {
     try {
@@ -122,12 +144,10 @@ const BookingScreen = () => {
       if (savedFavorites) {
         const favoritesArray = JSON.parse(savedFavorites);
         setIsFavorite(
-          favoritesArray.some((item: any) => item.id === params.barberId)
+          favoritesArray.some((item: any) => item.id === params.barberId),
         );
       }
-    } catch (e) {
-      console.error(e);
-    }
+    } catch (e) {}
   };
 
   const toggleFavorite = async () => {
@@ -136,7 +156,7 @@ const BookingScreen = () => {
       let favoritesArray = savedFavorites ? JSON.parse(savedFavorites) : [];
       if (isFavorite) {
         favoritesArray = favoritesArray.filter(
-          (item: any) => item.id !== params.barberId
+          (item: any) => item.id !== params.barberId,
         );
         setIsFavorite(false);
       } else {
@@ -148,70 +168,118 @@ const BookingScreen = () => {
         setIsFavorite(true);
       }
       await AsyncStorage.setItem("favorites", JSON.stringify(favoritesArray));
-    } catch (e) {
-      console.error(e);
-    }
+    } catch (e) {}
   };
 
   const handleConfirm = async () => {
     if (loading) return;
+    if (availabilityLoading || availabilityError) {
+      Alert.alert(
+        "تحقق من الوقت",
+        "ما قدرناش نتأكدو من الأوقات المتاحة. عاود جرّب قبل الحجز.",
+      );
+      return;
+    }
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+    if (userError && userError.name !== "AuthSessionMissingError") {
+      Alert.alert("خطأ في الحساب", userError.message);
+      return;
+    }
+    if (!user || userError) {
+      Alert.alert(
+        "Sign in required",
+        "Please sign in or create an account to complete your booking request.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Sign in",
+            onPress: () => {
+              setGuestMode(false);
+              router.replace("/" as any);
+            },
+          },
+        ],
+      );
+      return;
+    }
+
+    const selectedDateObj = generateDateList[parseInt(selectedDateId, 10)];
+    if (!selectedDateObj) {
+      Alert.alert("تاريخ غير صالح", "عاود اختار نهار الحجز.");
+      return;
+    }
+    const fullDate = `${selectedDateObj.day}, ${selectedDateObj.num}`;
+    const barberName = String(params.barberName || "Simo Dayyan");
     setLoading(true);
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      
-      const userId = user ? user.id : "guest-user";
-
-      const selectedDateObj = generateDateList[parseInt(selectedDateId)];
-      const fullDate = `${selectedDateObj.day}, ${selectedDateObj.num}`;
-
-      // إدخال الحجز في قاعدة البيانات
-      const { error } = await supabase.from("bookings").insert([
-        {
-          user_id: userId,
-          barber_name: params.barberName || "Simo Dayyan",
-          booking_date: fullDate,
-          booking_time: selectedTime,
-          status: "Confirmed",
-        },
-      ]);
-
-      if (error) throw error;
-      
-      // فتح الواتساب تلقائياً بالرقم المجدول (0693222558 -> 212693222558)
-      const phoneNumber = "212693222558";
-      const barberName = (params.barberName as string) || "Simo Dayyan";
-      const clientName = user?.email || "زبون المحل";
-
-      const message = `مرحباً، أريد تأكيد حجز جديد 💈:\n\n` +
-        `👤 الحلاق: ${barberName}\n` +
-        `✂️ الخدمة/الستايل: ${selectedService}\n` +
-        `📅 التاريخ: ${fullDate}\n` +
-        `⏰ الوقت: ${selectedTime}\n\n` +
-        `المرجو تأكيد الموعد، وشكراً!`;
-
-      const whatsappUrl = `https://api.whatsapp.com/send?phone=${phoneNumber}&text=${encodeURIComponent(message)}`;
-
-      const supported = await Linking.canOpenURL(whatsappUrl);
-      if (supported) {
-        await Linking.openURL(whatsappUrl);
-      } else {
-        Alert.alert("Error", "WhatsApp is not installed on this device.");
+      // Re-check on the server immediately before creating the request to avoid stale slots.
+      const { data: latestSlots, error: availabilityError } = await (
+        supabase as any
+      ).rpc("get_booking_availability", {
+        p_booking_date: fullDate,
+        p_barber_name: barberName,
+      });
+      if (availabilityError) throw availabilityError;
+      if (
+        (latestSlots || []).some(
+          (booking: any) => booking.booking_time === selectedTime,
+        )
+      ) {
+        setBookedSlots(latestSlots || []);
+        Alert.alert(
+          "الوقت غير متاح",
+          "هذا الموعد تحجز أو تسدّ للتو. اختار وقتاً آخر.",
+        );
+        return;
       }
 
-      // التوجيه نحو صفحة success
-      router.replace({
-        pathname: "/success" as any,
-        params: {
-          barberName: barberName,
-          time: selectedTime,
-          date: fullDate,
-          selectedService: selectedService,
+      const { error: bookingError } = await (supabase as any).rpc(
+        "create_pending_booking",
+        {
+          p_booking_date: fullDate,
+          p_booking_time: selectedTime,
+          p_barber_name: barberName,
+          p_service: selectedService,
         },
-      });
+      );
+      if (bookingError) throw bookingError;
+
+      const phoneNumber = "212693222558";
+      const message =
+        `مرحباً، بغيت نطلب موعد حلاقة 💈:\n\n` +
+        `👤 الحلاق: ${barberName}\n` +
+        `✂️ الخدمة: ${selectedService}\n` +
+        `📅 التاريخ: ${fullDate}\n` +
+        `⏰ الوقت: ${selectedTime}\n\n` +
+        `حالة الطلب: قيد الانتظار حتى تأكيد المحل.`;
+
+      const whatsappUrl = `https://api.whatsapp.com/send?phone=${phoneNumber}&text=${encodeURIComponent(message)}`;
+      try {
+        await Linking.openURL(whatsappUrl);
+      } catch {
+        Alert.alert(
+          "تم تسجيل الطلب",
+          "طلبك محفوظ وقيد الانتظار. تقدر تتبع الحالة من صفحة حجوزاتي.",
+        );
+      }
+      router.replace("/my-bookings" as any);
     } catch (error: any) {
-      Alert.alert("Booking Error", error.message || "Something went wrong");
+      if (
+        error.code === "23505" ||
+        String(error.message || "").includes("TIME_SLOT_CONFLICT")
+      ) {
+        setAvailabilityError("");
+        await fetchBookedSlots();
+        Alert.alert("الوقت غير متاح", "هذا الموعد تحجز للتو. اختار وقتاً آخر.");
+      } else {
+        Alert.alert(
+          "تعذر تسجيل الطلب",
+          error.message || "عاود المحاولة من فضلك.",
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -228,59 +296,80 @@ const BookingScreen = () => {
         backgroundColor="transparent"
       />
 
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 160 }}
-      >
-        <View style={styles.heroSection}>
-          <Image
-            style={styles.mainImage}
-            source={
-              params.barberImage
-                ? { uri: params.barberImage as string }
-                : { uri: "https://images.pexels.com/photos/1319461/pexels-photo-1319461.jpeg?auto=compress&cs=tinysrgb&w=800" }
-            }
-            contentFit="cover"
-          />
-          <LinearGradient
-            colors={["rgba(0,0,0,0.4)", "transparent", "rgba(11,11,11,0.95)"]}
-            style={styles.overlay}
-          />
+      {/* FIXED HERO SECTION */}
+      <View style={styles.fixedHero}>
+        <Image
+          style={styles.heroImage}
+          source={
+            params.barberImage
+              ? { uri: params.barberImage as string }
+              : {
+                  uri: "https://images.unsplash.com/photo-1503951914875-452162b0f3f1?q=80&w=1000&auto=format&fit=crop",
+                }
+          }
+          contentFit="cover"
+        />
+        <LinearGradient
+          colors={["rgba(0,0,0,0.3)", "rgba(0,0,0,0.1)", "rgba(0,0,0,1)"]}
+          style={styles.heroOverlay}
+        />
 
-          <Pressable style={styles.backBtn} onPress={() => router.back()}>
-            <BlurView intensity={80} tint="dark" style={styles.blurCircle}>
-              <Ionicons name="chevron-back" size={24} color="#fff" />
-            </BlurView>
+        {/* Top Buttons */}
+        <View style={[styles.topActions, { top: insets.top + 10 }]}>
+          <Pressable onPress={() => router.back()} style={styles.iconCircle}>
+            <BlurView
+              intensity={40}
+              tint="dark"
+              style={StyleSheet.absoluteFill}
+            />
+            <Ionicons name="chevron-back" size={24} color="#FFF" />
           </Pressable>
-
-          <Pressable style={styles.heartBtn} onPress={toggleFavorite}>
-            <BlurView intensity={80} tint="dark" style={styles.blurCircle}>
-              <Ionicons
-                name={isFavorite ? "heart" : "heart-outline"}
-                size={22}
-                color={isFavorite ? "#FF4B4B" : "#fff"}
-              />
-            </BlurView>
+          <Pressable onPress={toggleFavorite} style={styles.iconCircle}>
+            <BlurView
+              intensity={40}
+              tint="dark"
+              style={StyleSheet.absoluteFill}
+            />
+            <Ionicons
+              name={isFavorite ? "heart" : "heart-outline"}
+              size={22}
+              color={isFavorite ? "#FF4B4B" : "#FFF"}
+            />
           </Pressable>
         </View>
 
-        <View style={styles.contentCard}>
-          <View style={styles.handle} />
-          <Text style={styles.title}>{params.barberName || "Simo Dayyan"}</Text>
-
-          <View style={styles.selectedServiceCard}>
-            <View style={styles.serviceBadgeRow}>
-              <Ionicons name="sparkles" size={14} color={THEME.colors.primaryGold} />
-              <Text style={styles.serviceBadgeText}>الستايل المختار (AI Style Sync)</Text>
+        {/* Fixed Name and Service (Simplified with Star) */}
+        <View style={styles.fixedInfo}>
+          <Text style={styles.barberName}>
+            {params.barberName || "Simo Dayyan"}
+          </Text>
+          <View style={[styles.serviceCard, { borderColor: primaryColor }]}>
+            <View style={styles.serviceRow}>
+              <Ionicons
+                name="star"
+                size={16}
+                color={THEME.colors.primaryGold}
+              />
+              <Text style={styles.serviceName}>{selectedService}</Text>
             </View>
-            <Text style={styles.serviceNameText}>{selectedService}</Text>
           </View>
+        </View>
+      </View>
 
+      {/* SCROLLABLE CONTENT */}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{
+          paddingTop: height * 0.45,
+          paddingBottom: 150,
+        }}
+      >
+        <View style={styles.scrollContent}>
           <Text style={styles.sectionTitle}>Select Date</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
-            style={styles.dateList}
+            style={styles.dateScroll}
           >
             {generateDateList.map((item) => (
               <Pressable
@@ -288,13 +377,16 @@ const BookingScreen = () => {
                 onPress={() => setSelectedDateId(item.id)}
                 style={[
                   styles.dateBtn,
-                  selectedDateId === item.id && styles.dateBtnActive,
+                  selectedDateId === item.id && {
+                    backgroundColor: primaryColor,
+                    borderColor: primaryColor,
+                  },
                 ]}
               >
                 <Text
                   style={[
                     styles.dateDay,
-                    selectedDateId === item.id && styles.whiteText,
+                    selectedDateId === item.id && { color: "#FFF" },
                   ]}
                 >
                   {item.day}
@@ -302,7 +394,7 @@ const BookingScreen = () => {
                 <Text
                   style={[
                     styles.dateNum,
-                    selectedDateId === item.id && styles.whiteText,
+                    selectedDateId === item.id && { color: "#FFF" },
                   ]}
                 >
                   {item.num}
@@ -312,32 +404,80 @@ const BookingScreen = () => {
           </ScrollView>
 
           <Text style={styles.sectionTitle}>Select Time</Text>
+          {availabilityLoading && (
+            <View style={styles.availabilityNotice}>
+              <ActivityIndicator size="small" color={primaryColor} />
+              <Text style={styles.availabilityNoticeText}>
+                Checking available times…
+              </Text>
+            </View>
+          )}
+          {!!availabilityError && (
+            <Pressable
+              onPress={fetchBookedSlots}
+              style={styles.availabilityError}
+            >
+              <Text style={styles.availabilityErrorText}>
+                Could not verify times. Tap to retry.
+              </Text>
+            </Pressable>
+          )}
           <View style={styles.timeGrid}>
             {generateTimeSlots.map((time) => {
-              const isBooked = bookedSlots.includes(time);
+              const isAdminBlocked = bookedSlots.some(
+                (booking) =>
+                  booking.booking_time === time &&
+                  booking.status === "Blocked" &&
+                  booking.barber_name === "ADMIN_BLOCK",
+              );
+              const isUnavailable =
+                availabilityLoading ||
+                !!availabilityError ||
+                bookedSlots.some((booking) => booking.booking_time === time);
               return (
                 <Pressable
                   key={time}
-                  onPress={() => !isBooked && setSelectedTime(time)}
-                  disabled={isBooked}
+                  onPress={() => !isUnavailable && setSelectedTime(time)}
+                  disabled={isUnavailable}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    isAdminBlocked
+                      ? `${time}, locked by the shop`
+                      : `${time}${isUnavailable ? ", unavailable" : ""}`
+                  }
                   style={[
                     styles.timeBtn,
-                    selectedTime === time && !isBooked && styles.timeBtnActive,
-                    isBooked && styles.timeBtnDisabled,
+                    selectedTime === time &&
+                      !isUnavailable && {
+                        backgroundColor: primaryColor,
+                        borderColor: primaryColor,
+                      },
+                    isAdminBlocked
+                      ? styles.timeBtnBlocked
+                      : isUnavailable && styles.timeBtnFull,
                   ]}
                 >
                   <Text
                     style={[
                       styles.timeText,
-                      selectedTime === time && !isBooked && styles.whiteText,
-                      isBooked && styles.disabledText,
+                      selectedTime === time &&
+                        !isUnavailable && { color: "#FFF" },
+                      isAdminBlocked && styles.lockedTimeText,
+                      isUnavailable && !isAdminBlocked && { color: "#FF4B4B" },
                     ]}
                   >
                     {time}
                   </Text>
-                  {isBooked && (
+                  {isAdminBlocked ? (
+                    <View style={styles.lockedIndicator}>
+                      <Ionicons name="lock-closed" size={10} color="#FFC107" />
+                      <Text style={styles.lockedText}>Closed</Text>
+                    </View>
+                  ) : availabilityError ? (
+                    <Text style={styles.fullText}>Check</Text>
+                  ) : isUnavailable ? (
                     <Text style={styles.fullText}>Full</Text>
-                  )}
+                  ) : null}
                 </Pressable>
               );
             })}
@@ -345,24 +485,32 @@ const BookingScreen = () => {
         </View>
       </ScrollView>
 
-      <View style={styles.footerContainer}>
-        <BlurView intensity={90} tint="dark" style={styles.stickyFooter}>
-          <View style={styles.footerInner}>
-            <View style={{ flex: 1, marginRight: 10 }}>
-              <Text style={styles.footerLabel}>Selected Slot & Style</Text>
-              <Text style={styles.footerValue} numberOfLines={1}>
-                {currentSelectedDate ? `${currentSelectedDate.day}, ${currentSelectedDate.num}` : ""} • {selectedTime}
+      {/* FLOATING FOOTER */}
+      <View style={[styles.footerWrapper, { bottom: insets.bottom + 20 }]}>
+        <BlurView intensity={100} tint="dark" style={styles.footerBlur}>
+          <View style={styles.footerContent}>
+            <View style={styles.footerInfo}>
+              <Text style={styles.footerLabel}>Slot & Style</Text>
+              <Text style={styles.footerValue}>
+                {currentSelectedDate?.day} {currentSelectedDate?.num} •{" "}
+                {selectedTime}
               </Text>
             </View>
             <Pressable
-              style={styles.confirmBtn}
               onPress={handleConfirm}
-              disabled={loading}
+              disabled={loading || availabilityLoading || !!availabilityError}
+              style={({ pressed }) => [
+                styles.bookBtn,
+                {
+                  backgroundColor: primaryColor,
+                  transform: [{ scale: pressed ? 0.96 : 1 }],
+                },
+              ]}
             >
               {loading ? (
                 <ActivityIndicator color="#FFF" />
               ) : (
-                <Text style={styles.confirmText}>Book Now</Text>
+                <Text style={styles.bookBtnText}>Request booking</Text>
               )}
             </Pressable>
           </View>
@@ -373,131 +521,155 @@ const BookingScreen = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0B0B0B" },
-  heroSection: { height: height * 0.42, width: "100%", position: "relative" },
-  mainImage: { width: "100%", height: "100%" },
-  overlay: { ...StyleSheet.absoluteFillObject },
-  backBtn: { position: "absolute", top: 50, left: 20, zIndex: 100 },
-  heartBtn: { position: "absolute", top: 50, right: 20, zIndex: 100 },
-  blurCircle: {
+  container: { flex: 1, backgroundColor: "#000" },
+  fixedHero: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: height * 0.45,
+    zIndex: 10,
+  },
+  heroImage: { width: "100%", height: "100%" },
+  heroOverlay: { ...StyleSheet.absoluteFill },
+  topActions: {
+    position: "absolute",
+    left: 20,
+    right: 20,
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  iconCircle: {
     width: 45,
     height: 45,
     borderRadius: 23,
-    alignItems: "center",
-    justifyContent: "center",
     overflow: "hidden",
+    justifyContent: "center",
+    alignItems: "center",
   },
-  contentCard: {
-    backgroundColor: "#0B0B0B",
-    marginTop: -35,
-    borderTopLeftRadius: 35,
-    borderTopRightRadius: 35,
-    padding: 24,
-    minHeight: height * 0.6,
+  fixedInfo: { position: "absolute", bottom: 20, left: 24, right: 24 },
+  barberName: {
+    fontSize: 32,
+    fontWeight: "900",
+    color: "#FFF",
+    marginBottom: 10,
+    letterSpacing: -0.5,
   },
-  handle: {
-    width: 40,
-    height: 4,
-    backgroundColor: "#333",
-    borderRadius: 2,
-    alignSelf: "center",
-    marginBottom: 20,
+  serviceCard: {
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    borderRadius: 15,
+    borderWidth: 1,
+    padding: 12,
   },
-  title: {
-    fontSize: 26,
+  serviceRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  serviceName: { color: "#FFF", fontSize: 15, fontWeight: "700" },
+  scrollContent: { paddingHorizontal: 24 },
+  sectionTitle: {
+    fontSize: 17,
     fontWeight: "800",
     color: "#FFF",
+    marginTop: 25,
     marginBottom: 15,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
-  selectedServiceCard: {
-    backgroundColor: "#141414",
-    borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: "#D4AF37",
-    padding: 14,
-    marginBottom: 20,
-  },
-  serviceBadgeRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 },
-  serviceBadgeText: { color: "#D4AF37", fontSize: 11, fontWeight: "bold" },
-  serviceNameText: { color: "#FFF", fontSize: 15, fontWeight: "800" },
-
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#FFF",
-    marginBottom: 12,
-    marginTop: 10,
-  },
-  dateList: { flexDirection: "row", marginBottom: 15 },
+  dateScroll: { marginBottom: 5 },
   dateBtn: {
     width: 65,
     height: 85,
-    backgroundColor: "#141414",
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 12,
+    borderRadius: 20,
+    backgroundColor: "#111",
     borderWidth: 1,
-    borderColor: "#262626",
+    borderColor: "rgba(255,255,255,0.05)",
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 12,
   },
-  dateBtnActive: { backgroundColor: "#D4AF37", borderColor: "#D4AF37" },
-  dateDay: { fontSize: 11, color: "#888", fontWeight: "600", marginBottom: 4 },
-  dateNum: { fontSize: 20, fontWeight: "800", color: "#FFF" },
-  whiteText: { color: "#0B0B0B" },
+  dateDay: { fontSize: 11, color: "#777", fontWeight: "700", marginBottom: 4 },
+  dateNum: { fontSize: 20, color: "#FFF", fontWeight: "900" },
   timeGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
     justifyContent: "space-between",
+    gap: 10,
+  },
+  availabilityNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 12,
+  },
+  availabilityNoticeText: { color: "#AAA", fontSize: 12 },
+  availabilityError: {
+    backgroundColor: "rgba(244,67,54,0.12)",
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 12,
+  },
+  availabilityErrorText: {
+    color: "#FF8A80",
+    fontSize: 12,
+    fontWeight: "700",
+    textAlign: "center",
   },
   timeBtn: {
-    width: "31%",
-    height: 50,
-    backgroundColor: "#141414",
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 12,
+    width: (width - 48 - 20) / 3,
+    height: 52,
+    borderRadius: 14,
+    backgroundColor: "#111",
     borderWidth: 1,
-    borderColor: "#262626",
-  },
-  timeBtnActive: { backgroundColor: "#D4AF37", borderColor: "#D4AF37" },
-  timeBtnDisabled: {
-    backgroundColor: "#1a1a1a",
-    borderColor: "#222",
-    opacity: 0.5,
-  },
-  disabledText: { color: "#666", textDecorationLine: "line-through" },
-  timeText: { fontSize: 14, fontWeight: "600", color: "#CCC" },
-  fullText: { fontSize: 8, color: "#ff4444", fontWeight: "bold" },
-
-  footerContainer: {
-    position: "absolute",
-    bottom: 0,
-    width: "100%",
-    zIndex: 200,
-  },
-  stickyFooter: {
-    padding: 20,
-    paddingBottom: Platform.OS === "ios" ? 40 : 25,
-    borderTopWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
-  },
-  footerInner: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  footerLabel: { fontSize: 11, color: "#888", fontWeight: "600" },
-  footerValue: { fontSize: 14, fontWeight: "700", color: "#FFF", marginTop: 2 },
-  confirmBtn: {
-    backgroundColor: "#D4AF37",
-    paddingHorizontal: 25,
-    height: 50,
-    borderRadius: 16,
+    borderColor: "rgba(255,255,255,0.05)",
     justifyContent: "center",
     alignItems: "center",
   },
-  confirmText: { color: "#0B0B0B", fontSize: 15, fontWeight: "900" },
+  timeBtnFull: {
+    borderColor: "rgba(255, 75, 75, 0.2)",
+    backgroundColor: "rgba(255, 75, 75, 0.03)",
+  },
+  timeBtnBlocked: {
+    borderColor: "rgba(255, 193, 7, 0.45)",
+    backgroundColor: "rgba(255, 193, 7, 0.06)",
+  },
+  timeText: { color: "#FFF", fontSize: 14, fontWeight: "700" },
+  lockedTimeText: { color: "#FFC107" },
+  lockedIndicator: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    marginTop: 2,
+  },
+  lockedText: { color: "#FFC107", fontSize: 9, fontWeight: "800" },
+  fullText: { color: "#FF4B4B", fontSize: 9, fontWeight: "800", marginTop: 1 },
+  footerWrapper: { position: "absolute", left: 20, right: 20, zIndex: 100 },
+  footerBlur: {
+    borderRadius: 28,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  footerContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 10,
+    paddingLeft: 18,
+  },
+  footerInfo: { flex: 1 },
+  footerLabel: {
+    color: "rgba(255,255,255,0.4)",
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  footerValue: { color: "#FFF", fontSize: 14, fontWeight: "900", marginTop: 1 },
+  bookBtn: {
+    height: 52,
+    paddingHorizontal: 22,
+    borderRadius: 20,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  bookBtnText: { color: "#FFF", fontSize: 15, fontWeight: "900" },
 });
 
 export default BookingScreen;
